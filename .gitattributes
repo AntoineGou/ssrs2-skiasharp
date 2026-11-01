@@ -1,0 +1,4 @@
+*.patch -text
+*.sh text eol=lf
+*.js text eol=lf
+*.txt text eol=lf

@@ -1,0 +1,162 @@
+# Builds SkiaSharp's native library for nine RIDs, loads each on a machine that runs it, and on a tag publishes them as a
+# release.
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: Only the RIDs starting so (win, linux-musl...), to try a fix; empty for all
+        default: ''
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.rid }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { rid: osx, runner: macos-15, target: macos }
+          - { rid: win-x64, runner: windows-2022, arch: x64 }
+          - { rid: win-x86, runner: windows-2022, arch: x86 }
+          - { rid: win-arm64, runner: windows-2022, arch: arm64 }
+          - { rid: linux-x64, runner: ubuntu-24.04, target: linux, arch: x64 }
+          - { rid: linux-arm64, runner: ubuntu-24.04, target: linux, arch: arm64 }
+          - { rid: linux-arm, runner: ubuntu-24.04, target: linux, arch: arm }
+          - { rid: linux-musl-x64, runner: ubuntu-24.04, target: alpine, arch: x64 }
+          - { rid: linux-musl-arm64, runner: ubuntu-24.04, target: alpine, arch: arm64 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    steps:
+      - name: Selected
+        run: echo "SELECTED=${{ inputs.only == '' || startsWith(matrix.rid, inputs.only) }}" >> "$GITHUB_ENV"
+        shell: bash
+      - uses: actions/checkout@v4
+        if: env.SELECTED == 'true'
+      # (SkiaSharp's build scripts run on Cake under .NET 10; on Linux, in its own Docker images)
+      - uses: actions/setup-dotnet@v4
+        if: env.SELECTED == 'true' && runner.os != 'Linux'
+        with:
+          dotnet-version: 10.0.x
+      - name: Free disk space
+        if: env.SELECTED == 'true' && runner.os == 'Linux'
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h /
+      - name: Build
+        if: env.SELECTED == 'true' && runner.os != 'Windows'
+        run: ./build.sh "$RUNNER_TEMP/work" ${{ matrix.target }} ${{ matrix.arch }}
+      - name: Build
+        if: env.SELECTED == 'true' && runner.os == 'Windows'
+        shell: pwsh
+        run: ./build.ps1 C:\skwork ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        if: env.SELECTED == 'true'
+        with:
+          name: ${{ matrix.rid }}
+          path: ${{ runner.os == 'Windows' && 'C:/skwork' || format('{0}/work', runner.temp) }}/out/
+          if-no-files-found: error
+
+  test:
+    name: Test ${{ matrix.rid }}${{ matrix.dotnet && format(' ({0} .NET)', matrix.dotnet) || '' }}
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { rid: osx, runner: macos-15, publish: osx-arm64 }
+          - { rid: osx, runner: macos-15, publish: osx-x64, dotnet: x64 }
+          - { rid: win-x64, runner: windows-2022, publish: win-x64 }
+          - { rid: win-x86, runner: windows-2022, publish: win-x86, dotnet: x86 }
+          - { rid: win-arm64, runner: windows-11-arm, publish: win-arm64 }
+          - { rid: linux-x64, runner: ubuntu-24.04, publish: linux-x64 }
+          - { rid: linux-arm64, runner: ubuntu-24.04-arm, publish: linux-arm64 }
+          - { rid: linux-arm, runner: ubuntu-24.04, publish: linux-arm, docker: linux/arm/v7, image: 'mcr.microsoft.com/dotnet/runtime:8.0' }
+          - { rid: linux-musl-x64, runner: ubuntu-24.04, publish: linux-musl-x64, docker: linux/amd64, image: 'mcr.microsoft.com/dotnet/runtime:8.0-alpine' }
+          - { rid: linux-musl-arm64, runner: ubuntu-24.04-arm, publish: linux-musl-arm64, docker: linux/arm64, image: 'mcr.microsoft.com/dotnet/runtime:8.0-alpine' }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - name: Selected
+        run: echo "SELECTED=${{ inputs.only == '' || startsWith(matrix.rid, inputs.only) }}" >> "$GITHUB_ENV"
+        shell: bash
+      - uses: actions/checkout@v4
+        if: env.SELECTED == 'true'
+      - uses: actions/setup-dotnet@v4
+        if: env.SELECTED == 'true'
+        with:
+          dotnet-version: 8.0.x
+      - uses: actions/download-artifact@v4
+        if: env.SELECTED == 'true'
+        with:
+          name: ${{ matrix.rid }}
+          path: lib
+      # (the package's own library published with the test, then ours over it: the test fails with the package's)
+      - name: Build the test
+        if: env.SELECTED == 'true'
+        shell: bash
+        run: |
+          dotnet publish test/Smoke -c Release -r ${{ matrix.publish }} --self-contained false -o app
+          cp lib/libSkiaSharp.* app/
+      - name: Test
+        if: env.SELECTED == 'true' && matrix.dotnet == '' && matrix.docker == ''
+        run: dotnet app/Smoke.dll
+      - name: Test (x64 .NET under Rosetta)
+        if: env.SELECTED == 'true' && matrix.dotnet == 'x64'
+        run: |
+          curl -sSL https://dot.net/v1/dotnet-install.sh -o dotnet-install.sh
+          bash dotnet-install.sh --channel 8.0 --runtime dotnet --architecture x64 --install-dir "$RUNNER_TEMP/dotnet-x64"
+          arch -x86_64 "$RUNNER_TEMP/dotnet-x64/dotnet" app/Smoke.dll
+      - name: Test (x86 .NET)
+        if: env.SELECTED == 'true' && matrix.dotnet == 'x86'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://dot.net/v1/dotnet-install.ps1 -OutFile dotnet-install.ps1
+          ./dotnet-install.ps1 -Channel 8.0 -Runtime dotnet -Architecture x86 -InstallDir "$env:RUNNER_TEMP\dotnet-x86"
+          & "$env:RUNNER_TEMP\dotnet-x86\dotnet.exe" app/Smoke.dll
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+      - name: Set up QEMU
+        if: env.SELECTED == 'true' && matrix.docker == 'linux/arm/v7'
+        uses: docker/setup-qemu-action@v3
+      # (the library loads fontconfig, which the runtime images leave out)
+      - name: Test (in a container)
+        if: env.SELECTED == 'true' && matrix.docker != ''
+        run: >
+          docker run --rm --platform ${{ matrix.docker }} -v "$PWD:/w" -w /w ${{ matrix.image }} sh -c
+          "(command -v apk >/dev/null && apk add --no-cache -q fontconfig || (apt-get update -qq && apt-get install -y -qq libfontconfig1 >/dev/null))
+          && dotnet app/Smoke.dll"
+
+  release:
+    name: Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: test
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: built
+      - name: Package
+        run: |
+          mkdir dist
+          for d in built/*/; do
+            rid=$(basename "$d")
+            (cd "$d" && zip -qr "$GITHUB_WORKSPACE/dist/libSkiaSharp.$rid.zip" .)
+          done
+          (cd dist && sha256sum *.zip > SHA256SUMS)
+          cat dist/SHA256SUMS
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.zip
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "SkiaSharp 3.119.4's native library for nine RIDs, its PDF streams deflated at zlib's fastest level. Checksums in SHA256SUMS; build provenance attested by GitHub."
