@@ -1,26 +1,35 @@
 diff --git a/src/c/sk_document.cpp b/src/c/sk_document.cpp
-index 5bae6b8..4616b13 100644
+index 5bae6b8..d1f88ad 100644
 --- a/src/c/sk_document.cpp
 +++ b/src/c/sk_document.cpp
-@@ -19,12 +19,19 @@ void sk_document_unref(sk_document_t* document) {
+@@ -19,12 +19,28 @@ void sk_document_unref(sk_document_t* document) {
      SkSafeUnref(AsDocument(document));
  }
  
-+// SSRS2: a PDF's streams (page content, forms, fonts) deflated at zlib's fastest level, not its default: the bindings
-+// have no setting for it, and the default made deflating a document's pages a large part of writing it.
-+static SkPDF::Metadata FastestDeflate(SkPDF::Metadata metadata) {
-+    metadata.fCompressionLevel = SkPDF::Metadata::CompressionLevel::LowButFast;
++// SSRS2: the zlib level a PDF's streams are deflated at (page content, forms, fonts, the images not written as JPEG),
++// which the bindings have no field for. It comes in the metadata's encoding quality: 1000 or more is the level plus one
++// in thousands, plus the quality (1000 none, 2000 fastest ... 10000 smallest; 2101: fastest, images lossless). Without
++// it the level is zlib's fastest, not the PDF backend's default (zlib's 6), which made deflating a long document's pages
++// a large part of writing it. A library without this change reads such a quality as above 100: images lossless.
++static SkPDF::Metadata WithDeflateLevel(SkPDF::Metadata metadata) {
++    if (metadata.fEncodingQuality >= 1000) {
++        int level = metadata.fEncodingQuality / 1000 - 1;
++        metadata.fEncodingQuality %= 1000;
++        metadata.fCompressionLevel = static_cast<SkPDF::Metadata::CompressionLevel>(level < 9 ? level : 9);
++    } else {
++        metadata.fCompressionLevel = SkPDF::Metadata::CompressionLevel::LowButFast;
++    }
 +    return metadata;
 +}
 +
  sk_document_t* sk_document_create_pdf_from_stream(sk_wstream_t* stream) {
 -    return ToDocument(SkPDF::MakeDocument(AsWStream(stream)).release());
-+    return ToDocument(SkPDF::MakeDocument(AsWStream(stream), FastestDeflate(SkPDF::Metadata())).release());
++    return ToDocument(SkPDF::MakeDocument(AsWStream(stream), WithDeflateLevel(SkPDF::Metadata())).release());
  }
  
  sk_document_t* sk_document_create_pdf_from_stream_with_metadata(sk_wstream_t* stream, const sk_document_pdf_metadata_t* cmetadata) {
 -    return ToDocument(SkPDF::MakeDocument(AsWStream(stream), AsDocumentPDFMetadata(cmetadata)).release());
-+    return ToDocument(SkPDF::MakeDocument(AsWStream(stream), FastestDeflate(AsDocumentPDFMetadata(cmetadata))).release());
++    return ToDocument(SkPDF::MakeDocument(AsWStream(stream), WithDeflateLevel(AsDocumentPDFMetadata(cmetadata))).release());
  }
  
  sk_document_t* sk_document_create_xps_from_stream(sk_wstream_t* stream, float dpi) {

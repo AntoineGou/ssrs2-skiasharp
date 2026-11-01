@@ -1,9 +1,9 @@
 # SSRS2's SkiaSharp native library
 
 SkiaSharp's native library (`libSkiaSharp`) as [SSRS2](https://ssrs2.net) builds it: SkiaSharp 3.119.4's own sources
-and build scripts, with one change: a PDF's streams are deflated at zlib's fastest level. It takes the place of the
-library in the `SkiaSharp.NativeAssets.*` 3.119.4 packages: same file name, same API, used with the `SkiaSharp` 3.119.4
-package.
+and build scripts, with one change: a PDF's streams are deflated at the zlib level the document asks for, zlib's fastest
+when it names none. It takes the place of the library in the `SkiaSharp.NativeAssets.*` 3.119.4 packages: same file
+name, same API, used with the `SkiaSharp` 3.119.4 package.
 
 On SSRS2's 300-page test report, writing the PDF took 248 ms against 315 ms with SkiaSharp's own library (warm, on an
 M-series Mac), and the PDFs SSRS2's bench writes render the same pixel for pixel (macOS's PDF renderer), 2% to 5%
@@ -12,10 +12,23 @@ larger.
 ## What it changes
 
 `patches/skia/0001-ssrs2.patch`, on the Skia SkiaSharp pins: the PDF documents the C API makes
-(`sk_document_create_pdf_from_stream...`) take `SkPDF::Metadata::CompressionLevel::LowButFast`, zlib's level 1, in
-place of the default (level 6). SkiaSharp's bindings have no setting for it, and deflating each page's content at the
-default level was a large part of writing a long document. Every stream the PDF backend deflates is concerned (page
-content, forms, fonts, the images it does not write as JPEG); nothing else changes.
+(`sk_document_create_pdf_from_stream...`) deflate their streams at the level the metadata asks for, else at
+`SkPDF::Metadata::CompressionLevel::LowButFast`, zlib's level 1, in place of the PDF backend's default (zlib's level 6).
+SkiaSharp's bindings have no field for it, so it comes in `SKDocumentPdfMetadata.EncodingQuality`: a quality of 1000 or
+more is the zlib level plus one in thousands, plus the quality itself:
+
+| `EncodingQuality` | Streams deflated at | Images |
+| --- | --- | --- |
+| up to 101 (SkiaSharp's own values) | zlib's level 1, the fastest | as SkiaSharp says (101: lossless) |
+| 1101 | not deflated | lossless |
+| 2101 | level 1, the fastest | lossless |
+| 7101 | level 6, the PDF backend's default | lossless |
+| 10101 | level 9, the smallest | lossless |
+
+(`2050` is level 1 with images as JPEG at quality 50, and so on.) SkiaSharp's own library reads such a quality as above
+100, lossless, and deflates at its default level. Deflating each page's content at the default level was a large part
+of writing a long document. Every stream the PDF backend deflates is concerned (page content, forms, fonts, the images
+it does not write as JPEG); nothing else changes.
 
 Everything else is SkiaSharp's: its revision is in `skiasharp_revision` (SkiaSharp
 [f568ac9](https://github.com/mono/SkiaSharp/commit/f568ac94dd768ef9a2f593537cfde2dd0d348ef5), the 3.119.4 release, and
@@ -37,7 +50,8 @@ in its Docker images). Built so without the patch, the library wrote SSRS2's PDF
 ```
 
 The library is in `<work>/out`. `test/Smoke` loads it with the `SkiaSharp` 3.119.4 package (copied over the package's
-own library) and checks that every stream of a PDF is deflated at the fastest level and that it draws.
+own library) and checks that a PDF's streams are deflated at the fastest level when the document names none, at the
+level it names otherwise, and that it draws.
 
 ## Updating SkiaSharp
 
@@ -51,7 +65,7 @@ keep SkiaSharp's own library. HarfBuzzSharp's library is not built here.
 
 ## Releases
 
-A tag (`v3.119.4-ssrs2.1`...) builds the nine libraries, loads each on a machine of its platform, and publishes them as a
+A tag (`v3.119.4-ssrs2.1`...) builds the nine libraries, loads each on a machine of its platform (`test/Smoke`), and publishes them as a
 release: a zip per runtime, their SHA-256 sums, and GitHub's build provenance attestation.
 
 ## Licences

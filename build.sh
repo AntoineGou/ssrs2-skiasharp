@@ -35,7 +35,8 @@ case "$target" in
     built=$(find output/native/osx -maxdepth 1 -name libSkiaSharp.dylib | head -1)
     ;;
   linux)
-    scripts/Docker/debian/10/build-local.sh "$arch"
+    # (not executable in SkiaSharp's tree, unlike Alpine's)
+    bash scripts/Docker/debian/10/build-local.sh "$arch"
     built=output/native/linux/$arch/libSkiaSharp.so
     ;;
   alpine)

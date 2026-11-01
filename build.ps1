@@ -21,8 +21,12 @@ git submodule update --init --depth 1 externals/skia externals/depot_tools
 Write-Host "SkiaSharp $(git rev-parse HEAD), Skia $(git -C externals/skia rev-parse HEAD)"
 
 foreach ($patch in Get-ChildItem "$here/patches/skia/*.patch" | Sort-Object Name) {
+  # (a check that may fail: not an error here)
+  $PSNativeCommandUseErrorActionPreference = $false
   git -C externals/skia apply --reverse --check $patch.FullName 2>$null
-  if ($LASTEXITCODE -eq 0) { Write-Host "Applied already: $($patch.Name)"; continue }
+  $applied = $LASTEXITCODE -eq 0
+  $PSNativeCommandUseErrorActionPreference = $true
+  if ($applied) { Write-Host "Applied already: $($patch.Name)"; continue }
   Write-Host "Applying $($patch.Name)"
   git -C externals/skia apply $patch.FullName
 }
