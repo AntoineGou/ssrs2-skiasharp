@@ -1,0 +1,236 @@
+diff --git a/src/pdf/SkClusterator.cpp b/src/pdf/SkClusterator.cpp
+index 5eaed75..dd52b73 100644
+--- a/src/pdf/SkClusterator.cpp
++++ b/src/pdf/SkClusterator.cpp
+@@ -25,12 +25,22 @@ static bool is_reversed(const uint32_t* clusters, uint32_t count) {
+     return true;
+ }
+ 
++static bool is_ascending(const uint32_t* clusters, uint32_t count) {
++    for (uint32_t i = 0; i + 1 < count; ++i) {
++        if (clusters[i + 1] < clusters[i]) {
++            return false;
++        }
++    }
++    return true;
++}
++
+ SkClusterator::SkClusterator(const sktext::GlyphRun& run)
+     : fClusters(run.clusters().data())
+     , fUtf8Text(run.text().data())
+     , fGlyphCount(SkToU32(run.glyphsIDs().size()))
+     , fTextByteLength(SkToU32(run.text().size()))
+     , fReversedChars(fClusters ? is_reversed(fClusters, fGlyphCount) : false)
++    , fAscending(fClusters ? is_ascending(fClusters, fGlyphCount) : false)
+ {
+     if (fClusters) {
+         SkASSERT(fUtf8Text && fTextByteLength > 0 && fGlyphCount > 0);
+@@ -53,11 +63,18 @@ SkClusterator::Cluster SkClusterator::next() {
+     } while (fCurrentGlyphIndex < fGlyphCount && cluster == fClusters[fCurrentGlyphIndex]);
+     uint32_t clusterGlyphCount = fCurrentGlyphIndex - clusterGlyphIndex;
+     uint32_t clusterEnd = fTextByteLength;
+-    for (unsigned i = 0; i < fGlyphCount; ++i) {
+-       uint32_t c = fClusters[i];
+-       if (c > cluster && c < clusterEnd) {
+-           clusterEnd = c;
+-       }
++    if (fAscending) {
++        // (the smallest cluster past this one is the next glyph's, every later one being as large)
++        if (fCurrentGlyphIndex < fGlyphCount && fClusters[fCurrentGlyphIndex] < clusterEnd) {
++            clusterEnd = fClusters[fCurrentGlyphIndex];
++        }
++    } else {
++        for (unsigned i = 0; i < fGlyphCount; ++i) {
++           uint32_t c = fClusters[i];
++           if (c > cluster && c < clusterEnd) {
++               clusterEnd = c;
++           }
++        }
+     }
+     uint32_t clusterLen = clusterEnd - cluster;
+     return Cluster{fUtf8Text + cluster, clusterLen, clusterGlyphIndex, clusterGlyphCount};
+diff --git a/src/pdf/SkClusterator.h b/src/pdf/SkClusterator.h
+index 86fd6cd..e7f6522 100644
+--- a/src/pdf/SkClusterator.h
++++ b/src/pdf/SkClusterator.h
+@@ -42,6 +42,8 @@ private:
+     uint32_t const fGlyphCount;
+     uint32_t const fTextByteLength;
+     bool const fReversedChars;
++    // SSRS2: clusters that never decrease (left-to-right text): a cluster ends where the next glyph's starts.
++    bool const fAscending;
+     uint32_t fCurrentGlyphIndex = 0;
+ };
+ #endif  // SkClusterator_DEFINED
+diff --git a/src/pdf/SkPDFDevice.cpp b/src/pdf/SkPDFDevice.cpp
+index 469bdc7..8b20c27 100644
+--- a/src/pdf/SkPDFDevice.cpp
++++ b/src/pdf/SkPDFDevice.cpp
+@@ -673,12 +673,13 @@ public:
+             fInText = false;
+         }
+     }
+-    void setFont(SkPDFFont* pdfFont) {
++    // (SSRS2: thousandEM, whether the font's typeface has 1000 units per em, known by the run: asked of the typeface at
++    // every run before)
++    void setFont(SkPDFFont* pdfFont, bool thousandEM) {
+         this->flush();
+         fPDFFont = pdfFont;
+         // Reader 2020.013.20064 incorrectly advances some Type3 fonts https://crbug.com/1226960
+         bool convertedToType3 = fPDFFont->getType() == SkAdvancedTypefaceMetrics::kOther_Font;
+-        bool thousandEM = fPDFFont->typeface()->getUnitsPerEm() == 1000;
+         fViewersAgreeOnAdvancesInFont = thousandEM || !convertedToType3;
+     }
+     void writeGlyph(uint16_t glyph, SkScalar advanceWidth, SkPoint xy) {
+@@ -846,14 +847,14 @@ void SkPDFDevice::internalDrawGlyphRun(
+     if (!metrics) {
+         return;
+     }
+-    SkAdvancedTypefaceMetrics::FontType fontType = SkPDFFont::FontType(*typeface, *metrics);
++    SkAdvancedTypefaceMetrics::FontType fontType = SkPDFFont::FontType(fDocument, *typeface, *metrics);
+ 
+     const std::vector<SkUnichar>& glyphToUnicode = SkPDFFont::GetUnicodeMap(typeface, fDocument);
+ 
+     SkClusterator clusterator(glyphRun);
+ 
+-    int emSize;
+-    SkStrikeSpec strikeSpec = SkStrikeSpec::MakePDFVector(*typeface, &emSize);
++    const SkPDFDocument::GlyphRunFace& face = fDocument->glyphRunFace(*typeface);
++    int emSize = face.fEmSize;
+ 
+     SkScalar textSize = glyphRunFont.getSize();
+     SkScalar advanceScale = textSize * glyphRunFont.getScaleX() / emSize;
+@@ -876,7 +877,7 @@ void SkPDFDevice::internalDrawGlyphRun(
+ 
+     ScopedOutputMarkedContentTags mark(fNodeId, fDocument, out);
+ 
+-    const int numGlyphs = typeface->countGlyphs();
++    const int numGlyphs = face.fGlyphCount;
+ 
+     if (clusterator.reversedChars()) {
+         out->writeText("/ReversedChars BMC\n");
+@@ -885,7 +886,7 @@ void SkPDFDevice::internalDrawGlyphRun(
+     GlyphPositioner glyphPositioner(out, glyphRunFont.getSkewX(), offset);
+     SkPDFFont* font = nullptr;
+ 
+-    SkBulkGlyphMetricsAndPaths paths{strikeSpec};
++    SkBulkGlyphMetricsAndPaths paths{sk_sp<SkStrike>(face.fStrike)};
+     auto glyphs = paths.glyphs(glyphRun.glyphsIDs());
+ 
+     while (SkClusterator::Cluster c = clusterator.next()) {
+@@ -940,7 +941,7 @@ void SkPDFDevice::internalDrawGlyphRun(
+                 // Not yet specified font or need to switch font.
+                 font = SkPDFFont::GetFontResource(fDocument, glyphs[index], typeface);
+                 SkASSERT(font);  // All preconditions for SkPDFFont::GetFontResource are met.
+-                glyphPositioner.setFont(font);
++                glyphPositioner.setFont(font, emSize == 1000);
+                 SkPDFWriteResourceName(out, SkPDFResourceType::kFont,
+                                        add_resource(fFontResources, font->indirectReference()));
+                 out->writeText(" ");
+diff --git a/src/pdf/SkPDFDocument.cpp b/src/pdf/SkPDFDocument.cpp
+index 9aec1d9..4aebb79 100644
+--- a/src/pdf/SkPDFDocument.cpp
++++ b/src/pdf/SkPDFDocument.cpp
+@@ -12,6 +12,7 @@
+ #include "include/docs/SkPDFDocument.h"
+ #include "include/private/base/SkTo.h"
+ #include "src/base/SkUTF.h"
++#include "src/core/SkStrikeSpec.h"
+ #include "src/pdf/SkPDFDevice.h"
+ #include "src/pdf/SkPDFFont.h"
+ #include "src/pdf/SkPDFGradientShader.h"
+@@ -222,6 +223,18 @@ SkPDFDocument::SkPDFDocument(SkWStream* stream,
+     fExecutor = fMetadata.fExecutor;
+ }
+ 
++const SkPDFDocument::GlyphRunFace& SkPDFDocument::glyphRunFace(const SkTypeface& typeface) {
++    SkTypefaceID id = typeface.uniqueID();
++    if (const GlyphRunFace* known = fGlyphRunFaces.find(id)) {
++        return *known;
++    }
++    GlyphRunFace face;
++    SkStrikeSpec strikeSpec = SkStrikeSpec::MakePDFVector(typeface, &face.fEmSize);
++    face.fGlyphCount = typeface.countGlyphs();
++    face.fStrike = strikeSpec.findOrCreateStrike();
++    return *fGlyphRunFaces.set(id, std::move(face));
++}
++
+ SkPDFDocument::~SkPDFDocument() {
+     // subclasses of SkDocument must call close() in their destructors.
+     this->close();
+diff --git a/src/pdf/SkPDFDocumentPriv.h b/src/pdf/SkPDFDocumentPriv.h
+index 2625ac0..477831d 100644
+--- a/src/pdf/SkPDFDocumentPriv.h
++++ b/src/pdf/SkPDFDocumentPriv.h
+@@ -12,6 +12,7 @@
+ #include "include/docs/SkPDFDocument.h"
+ #include "include/private/base/SkMutex.h"
+ #include "src/core/SkTHash.h"
++#include "src/core/SkStrike.h"
+ #include "src/pdf/SkPDFGraphicState.h"
+ #include "src/pdf/SkPDFMetadata.h"
+ #include "src/pdf/SkPDFShader.h"
+@@ -153,6 +154,17 @@ public:
+     skia_private::THashMap<uint32_t, SkPDFIndirectReference> fFontDescriptors;
+     skia_private::THashMap<uint32_t, SkPDFIndirectReference> fType3FontDescriptors;
+     skia_private::THashMap<uint64_t, SkPDFFont> fFontMap;
++    // SSRS2: what each run of glyphs needs of its typeface, found at the typeface's first run of the document (each run
++    // asked the font's type, a table query to the platform's font, its units per em and glyph count, and looked its path
++    // strike up by a descriptor made anew).
++    struct GlyphRunFace {
++        int fEmSize = 0;
++        int fGlyphCount = 0;
++        sk_sp<SkStrike> fStrike;
++    };
++    skia_private::THashMap<uint32_t, int> fFontTypes;
++    skia_private::THashMap<uint32_t, GlyphRunFace> fGlyphRunFaces;
++    const GlyphRunFace& glyphRunFace(const SkTypeface&);
+     skia_private::THashMap<SkPDFStrokeGraphicState,
+                            SkPDFIndirectReference,
+                            SkPDFStrokeGraphicState::Hash> fStrokeGSMap;
+diff --git a/src/pdf/SkPDFFont.cpp b/src/pdf/SkPDFFont.cpp
+index a9cafb4..209c88f 100644
+--- a/src/pdf/SkPDFFont.cpp
++++ b/src/pdf/SkPDFFont.cpp
+@@ -191,6 +191,18 @@ SkAdvancedTypefaceMetrics::FontType SkPDFFont::FontType(const SkTypeface& typefa
+     return metrics.fType;
+ }
+ 
++SkAdvancedTypefaceMetrics::FontType SkPDFFont::FontType(SkPDFDocument* doc,
++                                                        const SkTypeface& typeface,
++                                                        const SkAdvancedTypefaceMetrics& metrics) {
++    SkTypefaceID id = typeface.uniqueID();
++    if (int* known = doc->fFontTypes.find(id)) {
++        return static_cast<SkAdvancedTypefaceMetrics::FontType>(*known);
++    }
++    SkAdvancedTypefaceMetrics::FontType type = SkPDFFont::FontType(typeface, metrics);
++    doc->fFontTypes.set(id, static_cast<int>(type));
++    return type;
++}
++
+ static SkGlyphID first_nonzero_glyph_for_single_byte_encoding(SkGlyphID gid) {
+     return gid != 0 ? gid - (gid - 1) % 255 : 1;
+ }
+@@ -204,7 +216,7 @@ SkPDFFont* SkPDFFont::GetFontResource(SkPDFDocument* doc,
+     SkASSERT(fontMetrics);  // SkPDFDevice::internalDrawText ensures the typeface is good.
+                             // GetMetrics only returns null to signify a bad typeface.
+     const SkAdvancedTypefaceMetrics& metrics = *fontMetrics;
+-    SkAdvancedTypefaceMetrics::FontType type = SkPDFFont::FontType(*face, metrics);
++    SkAdvancedTypefaceMetrics::FontType type = SkPDFFont::FontType(doc, *face, metrics);
+     if (!(glyph->isEmpty() || glyph->path())) {
+         type = SkAdvancedTypefaceMetrics::kOther_Font;
+     }
+diff --git a/src/pdf/SkPDFFont.h b/src/pdf/SkPDFFont.h
+index 18cd483..e49bdc7 100644
+--- a/src/pdf/SkPDFFont.h
++++ b/src/pdf/SkPDFFont.h
+@@ -45,6 +45,9 @@ public:
+ 
+     static SkAdvancedTypefaceMetrics::FontType FontType(const SkTypeface&,
+                                                         const SkAdvancedTypefaceMetrics&);
++    // SSRS2: the same, found once per typeface in the document.
++    static SkAdvancedTypefaceMetrics::FontType FontType(SkPDFDocument*, const SkTypeface&,
++                                                        const SkAdvancedTypefaceMetrics&);
+     static void GetType1GlyphNames(const SkTypeface&, SkString*);
+ 
+     static bool IsMultiByte(SkAdvancedTypefaceMetrics::FontType type) {

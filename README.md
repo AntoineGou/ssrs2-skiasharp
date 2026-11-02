@@ -1,8 +1,8 @@
 # SSRS2's SkiaSharp native library
 
 SkiaSharp's native library (`libSkiaSharp`) as [SSRS2](https://ssrs2.net) builds it: SkiaSharp 3.119.4's own sources
-and build scripts, with one change: a PDF's streams are deflated at the zlib level the document asks for, zlib's fastest
-when it names none. It takes the place of the library in the `SkiaSharp.NativeAssets.*` 3.119.4 packages: same file
+and build scripts, with two changes: a PDF's streams are deflated at the zlib level the document asks for, zlib's fastest
+when it names none; and the PDF backend writes each run of text without asking again what it knows of the run's font. It takes the place of the library in the `SkiaSharp.NativeAssets.*` 3.119.4 packages: same file
 name, same API, used with the `SkiaSharp` 3.119.4 package.
 
 On SSRS2's 300-page test report, writing the PDF took 248 ms against 315 ms with SkiaSharp's own library (warm, on an
@@ -30,6 +30,15 @@ more is the zlib level plus one in thousands, plus the quality itself:
 of writing a long document. Every stream the PDF backend deflates is concerned (page content, forms, fonts, the images
 it does not write as JPEG); nothing else changes.
 
+`patches/skia/0002-ssrs2-pdf-text.patch`: what the PDF backend wrote each run of text with, found again for every run
+(`SkPDFDevice::internalDrawGlyphRun`), is found once per typeface in the document: the font's type (which asked the
+platform's font whether it has a COLR table, twice a run), its units per em and glyph count, and the strike of its glyph
+outlines (a descriptor made and looked up in the glyph cache at every run). A cluster's end is the next glyph's cluster
+when a run's clusters never decrease (`SkClusterator`, which searched the whole run for each cluster). The PDFs are byte
+for byte those without it (SSRS2's 22 bench PDFs and the 100 of its report corpus, macOS arm64). On SSRS2's 300-page test report
+the PDF's writing took 105 to 118 ms against 132 to 135 without it (warm, on an M-series Mac; the font table queries
+are macOS's most).
+
 Everything else is SkiaSharp's: its revision is in `skiasharp_revision` (SkiaSharp
 [f568ac9](https://github.com/mono/SkiaSharp/commit/f568ac94dd768ef9a2f593537cfde2dd0d348ef5), the 3.119.4 release, and
 the Skia it pins, [mono/skia 7dbfc07](https://github.com/mono/skia/commit/7dbfc07dd33181f84e0958afb7ee805c6c769f0b)),
@@ -51,11 +60,12 @@ in its Docker images). Built so without the patch, the library wrote SSRS2's PDF
 
 The library is in `<work>/out`. `test/Smoke` loads it with the `SkiaSharp` 3.119.4 package (copied over the package's
 own library) and checks that a PDF's streams are deflated at the fastest level when the document names none, at the
-level it names otherwise, and that it draws.
+level it names otherwise, that a run of text with its clusters says what a cluster of two glyphs reads, and that it
+draws.
 
 ## Updating SkiaSharp
 
-Put the new release's commit in `skiasharp_revision`: the patch is one function and usually applies as it is.
+Put the new release's commit in `skiasharp_revision`: the patches are small and usually apply as they are.
 
 ## Platforms
 
