@@ -159,4 +159,4 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "SkiaSharp 3.119.4's native library for nine RIDs, its PDF streams deflated at zlib's fastest level. Checksums in SHA256SUMS; build provenance attested by GitHub."
+        run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "SkiaSharp 3.119.4's native library for nine RIDs, with SSRS2's changes: a PDF's streams deflated at the level the document asks for (zlib's fastest when none), the PDF backend's runs of text written without looking their font up again, and Skia's locks spinning briefly before they sleep. Checksums in SHA256SUMS; build provenance attested by GitHub."
