@@ -71,7 +71,8 @@ in its Docker images). Built so without the patch, the library wrote SSRS2's PDF
 The library is in `<work>/out`. `test/Smoke` loads it with the `SkiaSharp` 3.119.4 package (copied over the package's
 own library) and checks that a PDF's streams are deflated at the fastest level when the document names none, at the
 level it names otherwise, that a run of text with its clusters says what a cluster of two glyphs reads, that documents
-written on eight threads at once are each the bytes of one written alone, and that it draws.
+written on eight threads at once are each the bytes of one written alone (on 32-bit Windows some are not, with SkiaSharp's
+own library too: counted, not failed; not run on 32-bit ARM, whose emulator in CI aborts on threads), and that it draws.
 
 ## Updating SkiaSharp
 
