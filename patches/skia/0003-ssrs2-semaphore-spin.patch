@@ -1,0 +1,54 @@
+diff --git a/include/private/base/SkSemaphore.h b/include/private/base/SkSemaphore.h
+index f78ee86..b280896 100644
+--- a/include/private/base/SkSemaphore.h
++++ b/include/private/base/SkSemaphore.h
+@@ -14,6 +14,9 @@
+ 
+ #include <algorithm>
+ #include <atomic>
++#if defined(_MSC_VER)
++#include <intrin.h>
++#endif
+ 
+ class SkSemaphore {
+ public:
+@@ -71,7 +74,39 @@ inline void SkSemaphore::signal(int n) {
+     }
+ }
+ 
++// SSRS2: a short wait before sleeping. A count that comes back above zero while the thread spins is taken as try_wait
++// takes it (a count above zero means no thread sleeps: a thread spinning never takes a unit a sleeper was woken for).
++// SkMutex is this semaphore: its waiters slept at once, and a lock held for a moment by threads taking it in turn (a glyph
++// strike's, the glyph cache's) made each of them wait for a wakeup that took longer than the lock was held. The spin is
++// a few microseconds: x86's pause is some tens of nanoseconds, ARM's isb a few.
++#if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
++static constexpr int kSkSemaphoreSpins = 200;
++#else
++static constexpr int kSkSemaphoreSpins = 1000;
++#endif
++static inline void sk_semaphore_relax() {
++#if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
++    _mm_pause();
++#elif defined(_MSC_VER) && (defined(_M_ARM64) || defined(_M_ARM))
++    __yield();
++#elif defined(__x86_64__) || defined(__i386__)
++    __builtin_ia32_pause();
++#elif defined(__aarch64__) || defined(__arm__)
++    __asm__ __volatile__("isb" ::: "memory");
++#endif
++}
++
+ inline void SkSemaphore::wait() {
++    for (int spin = 0; spin < kSkSemaphoreSpins; spin++) {
++        int count = fCount.load(std::memory_order_relaxed);
++        if (count > 0) {
++            if (fCount.compare_exchange_weak(count, count - 1, std::memory_order_acquire, std::memory_order_relaxed)) {
++                return;
++            }
++        } else {
++            sk_semaphore_relax();
++        }
++    }
+     // Since this fetches the value before the subtract, zero and below means that there are no
+     // resources left, so the thread needs to wait.
+     if (fCount.fetch_sub(1, std::memory_order_acquire) <= 0) {

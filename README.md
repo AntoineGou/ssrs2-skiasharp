@@ -1,8 +1,9 @@
 # SSRS2's SkiaSharp native library
 
 SkiaSharp's native library (`libSkiaSharp`) as [SSRS2](https://ssrs2.net) builds it: SkiaSharp 3.119.4's own sources
-and build scripts, with two changes: a PDF's streams are deflated at the zlib level the document asks for, zlib's fastest
-when it names none; and the PDF backend writes each run of text without asking again what it knows of the run's font. It takes the place of the library in the `SkiaSharp.NativeAssets.*` 3.119.4 packages: same file
+and build scripts, with three changes: a PDF's streams are deflated at the zlib level the document asks for, zlib's
+fastest when it names none; the PDF backend writes each run of text without asking again what it knows of the run's
+font; and a thread waiting for one of Skia's locks spins a few microseconds before it sleeps. It takes the place of the library in the `SkiaSharp.NativeAssets.*` 3.119.4 packages: same file
 name, same API, used with the `SkiaSharp` 3.119.4 package.
 
 On SSRS2's 300-page test report, writing the PDF took 248 ms against 315 ms with SkiaSharp's own library (warm, on an
@@ -39,6 +40,15 @@ for byte those without it (SSRS2's 22 bench PDFs and the 100 of its report corpu
 the PDF's writing took 105 to 118 ms against 132 to 135 without it (warm, on an M-series Mac; the font table queries
 are macOS's most).
 
+`patches/skia/0003-ssrs2-semaphore-spin.patch`: `SkMutex` is `SkSemaphore`, whose waiters slept at once. Locks held for a
+moment by threads taking them in turn (a glyph strike's, which every run of text of a font takes, and the glyph cache's)
+made each waiter sleep and wait for a wakeup that took longer than the lock was held, so that documents written at once
+in one process with the same fonts queued on them. `SkSemaphore::wait` now first spins, taking a unit that comes free as
+`try_wait` takes one (only while the count is above zero, when no thread sleeps: a spinning thread never takes a unit a
+sleeper was woken for), up to 200 pauses on x86 and 1,000 `isb` on ARM, then sleeps as before. SSRS2's report corpus
+rendered as PDF on eight threads at once (720 documents): 6.8 to 7.0 s against 5.6 to 5.8 s (macOS arm64); a document
+alone the same. The smoke test writes documents on eight threads at once, each the same bytes as one written alone.
+
 Everything else is SkiaSharp's: its revision is in `skiasharp_revision` (SkiaSharp
 [f568ac9](https://github.com/mono/SkiaSharp/commit/f568ac94dd768ef9a2f593537cfde2dd0d348ef5), the 3.119.4 release, and
 the Skia it pins, [mono/skia 7dbfc07](https://github.com/mono/skia/commit/7dbfc07dd33181f84e0958afb7ee805c6c769f0b)),
@@ -60,8 +70,8 @@ in its Docker images). Built so without the patch, the library wrote SSRS2's PDF
 
 The library is in `<work>/out`. `test/Smoke` loads it with the `SkiaSharp` 3.119.4 package (copied over the package's
 own library) and checks that a PDF's streams are deflated at the fastest level when the document names none, at the
-level it names otherwise, that a run of text with its clusters says what a cluster of two glyphs reads, and that it
-draws.
+level it names otherwise, that a run of text with its clusters says what a cluster of two glyphs reads, that documents
+written on eight threads at once are each the bytes of one written alone, and that it draws.
 
 ## Updating SkiaSharp
 

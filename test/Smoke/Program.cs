@@ -1,11 +1,11 @@
 // Smoke test: SkiaSharp 3.119.4's managed bindings with the library built here (copied over the package's own, which
 // would fail it): a PDF's streams deflated at zlib's fastest level when the metadata names none (their zlib header
 // 78 01), at the level it names otherwise (in the encoding quality: 10101 is level 9, 78 DA), a run of text with its
-// clusters written as the PDF backend writes it, and a raster drawing.
+// clusters written as the PDF backend writes it, documents written on several threads at once, and a raster drawing.
 using System.Text;
 using SkiaSharp;
 
-bool ok = Deflated(101, 0x01) & Deflated(10101, 0xDA) & Deflated(7101, 0x9C) & Clusters();
+bool ok = Deflated(101, 0x01) & Deflated(10101, 0xDA) & Deflated(7101, 0x9C) & Clusters() & AtOnce();
 
 // A page written with the encoding quality given: every deflated stream's second byte the one expected
 static bool Deflated(int quality, byte expected)
@@ -79,6 +79,40 @@ static bool Clusters()
     Console.WriteLine($"clusters: {spans} /ActualText span(s){(right ? ", the cluster's text" : "")}");
     if (!right) Console.WriteLine(text[Math.Max(0, text.IndexOf("BT", StringComparison.Ordinal))..][..Math.Min(400, text.Length - text.IndexOf("BT", StringComparison.Ordinal))]);
     return right;
+}
+
+// Documents written on eight threads at once (their text sharing the glyph cache and its locks): each the same bytes as
+// one written alone.
+static bool AtOnce()
+{
+    static byte[] Write()
+    {
+        var stream = new SKDynamicMemoryWStream();
+        using (var document = SKDocument.CreatePdf(stream, new SKDocumentPdfMetadata { Title = "Smoke test", Producer = "Smoke test", EncodingQuality = 2101 }))
+        {
+            for (int page = 0; page < 3; page++)
+            {
+                var canvas = document.BeginPage(300, 400);
+                using var paint = new SKPaint { Color = SKColors.Navy, IsAntialias = true };
+                using var font = new SKFont(SKTypeface.Default, 11);
+                for (int line = 0; line < 30; line++) canvas.DrawText($"Page {page}, line {line}: the quick brown fox jumps", 10, 12 + 12 * line, font, paint);
+                document.EndPage();
+            }
+            document.Close();
+        }
+        using var data = stream.DetachAsData();
+        return data.ToArray();
+    }
+    var alone = Write();
+    int differ = 0;
+    var threads = Enumerable.Range(0, 8).Select(_ => new Thread(() =>
+    {
+        for (int i = 0; i < 20; i++) if (!Write().AsSpan().SequenceEqual(alone)) Interlocked.Increment(ref differ);
+    })).ToList();
+    threads.ForEach(t => t.Start());
+    threads.ForEach(t => t.Join());
+    Console.WriteLine($"at once: 160 documents on 8 threads, {differ} unlike the one written alone");
+    return differ == 0;
 }
 
 using var bitmap = new SKBitmap(64, 64);
